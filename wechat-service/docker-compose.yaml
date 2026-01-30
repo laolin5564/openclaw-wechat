@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  # MySQL 数据库（ARM64 原生支持，带 utf8mb4 字符集）
+  mysql:
+    image: mysql:8.0
+    container_name: my-mysql
+    restart: always
+    network_mode: host
+    environment:
+      MYSQL_ROOT_PASSWORD: "lln@2022"
+      MYSQL_DATABASE: "lln-robot2"
+      LANG: C.UTF-8
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # Redis 缓存
+  redis:
+    image: redis:6.2
+    container_name: my-redis
+    restart: always
+    network_mode: host
+    command: redis-server --requirepass "lln@2022"
+    volumes:
+      - redis_data:/data
+
+  # 应用服务
+  app:
+    build: .
+    container_name: my-go-app
+    restart: always
+    network_mode: host
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./log:/app/log
+      - ./data:/app/data
+    depends_on:
+      - mysql
+      - redis
+
+volumes:
+  mysql_data:
+  redis_data:

@@ -1,0 +1,35 @@
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+npm-debug.log*
+
+# 日志
+*.log
+log/
+logs/
+
+# 数据
+data/
+*.db
+
+# 配置（敏感信息）
+config.local.json
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 构建产物
+dist/
+build/
+
+# 二进制文件（从 Release 下载）
+wechat-service/wechat-service-*
+*.exe
