@@ -7,7 +7,7 @@ import * as logger from './logger.mjs';
 import { loadConfig, saveConfig, saveAuthKey, getPaths, ensureDirs } from './config.mjs';
 import { createWechatService } from './wechat.mjs';
 import { delay } from './utils.mjs';
-import readline from 'readline';
+import readline from 'node:readline';
 import qrcode from 'qrcode-terminal';
 
 /**
@@ -155,7 +155,7 @@ async function initConfig() {
 
   const wechatService = createWechatService({
     ...config.wechatService,
-    adminKey: 'daidai',
+    adminKey: process.env.WECHAT_ADMIN_KEY || 'daidai',
   });
 
   try {
@@ -163,7 +163,7 @@ async function initConfig() {
     const authKey = await wechatService.genAuthKey(1, 365);
     saveAuthKey(authKey);
     config.wechatService.authKey = authKey;
-    logger.success(`授权码已生成: ${authKey}`);
+    logger.success('授权码已生成并保存');
   } catch (error) {
     logger.error('生成授权码失败', error.message);
     rl.close();
@@ -209,7 +209,7 @@ async function initConfig() {
 
   const paths = getPaths();
   logger.info(`配置文件: ${paths.configFile}`);
-  logger.info(`授权码: ${config.wechatService.authKey}`);
+  logger.info(`授权码: *** (已保存)`);
   logger.info(`Gateway: ${config.gateway.url}`);
   logger.info(`微信服务: ${config.wechatService.host}:${config.wechatService.port}`);
 

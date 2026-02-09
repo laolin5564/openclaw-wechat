@@ -17,9 +17,11 @@
 ### 核心特性
 
 - ✅ **微信私聊对话** - 一对一私聊，天然安全
-- ✅ **执行 AI 技能** - 调用 Moltbot 所有技能
-- ✅ **扫码登录** - 微信扫码即可登录
-- ✅ **自动重连** - 断线自动重连，无需手动干预
+- ✅ **执行 AI 技能** - 调用 OpenClaw 所有技能
+- ✅ **文件收发** - 支持收发文件、图片、视频、语音
+- ✅ **配对码认证** - 新用户发送配对码即可授权
+- ✅ **扫码登录** - 微信扫码即可登录，支持免扫码唤醒
+- ✅ **自动重连** - 断线自动重连（指数退避），无需手动干预
 - ✅ **进程保活** - 支持系统服务，崩溃自动重启
 - ✅ **跨平台** - 支持 macOS、Linux、Windows
 
@@ -78,14 +80,17 @@ openclaw-wechat/
 │   ├── windows/      # Windows 可执行文件
 │   ├── darwin/       # macOS 可执行文件
 │   └── linux/        # Linux 可执行文件
-├── bridge/           # Node.js 桥接器
-│   ├── bridge.mjs    # 核心桥接逻辑
-│   ├── gateway.mjs   # Gateway 通信模块
-│   ├── wechat.mjs    # 微信服务通信模块
-│   ├── config.mjs    # 配置管理模块
-│   ├── logger.mjs    # 日志模块
-│   ├── utils.mjs     # 工具函数
-│   ├── setup.mjs     # 初始化脚本
+├── bridge/                  # Node.js 桥接器
+│   ├── bridge.mjs           # 核心桥接逻辑（消息转发、文件/图片收发）
+│   ├── gateway.mjs          # OpenClaw Gateway WebSocket 通信模块
+│   ├── wechat.mjs           # 微信 iPad 协议服务通信模块（HTTP + WebSocket）
+│   ├── config.mjs           # 配置管理（配置文件、授权码、用户白名单、配对码）
+│   ├── logger.mjs           # 分级日志模块（控制台 + 文件）
+│   ├── utils.mjs            # 工具函数（消息解析、格式化、平台检测）
+│   ├── init.mjs             # 交互式初始化向导
+│   ├── setup.mjs            # 快速非交互式初始化
+│   ├── setup-service.mjs    # 系统服务配置（launchd / systemd）
+│   ├── test-file-feature.mjs # 文件发送功能单元测试
 │   └── package.json
 ├── scripts/          # 启动/停止脚本
 │   ├── start.sh      # macOS/Linux 启动

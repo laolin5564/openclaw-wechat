@@ -3,10 +3,10 @@
  * 配置 launchd (macOS) 或 systemd (Linux) 服务
  */
 
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { execSync } from 'child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { execSync } from 'node:child_process';
 import { getPaths, ensureDirs } from './config.mjs';
 import * as logger from './logger.mjs';
 import { platform } from './utils.mjs';
