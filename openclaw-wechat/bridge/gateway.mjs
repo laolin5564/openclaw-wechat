@@ -1,6 +1,6 @@
 /**
  * OpenClaw Gateway 通信模块
- * 参考: https://github.com/AlexAnys/feishu-openclaw
+ * 强化版：含连接重试、响应校验、完善日志
  */
 
 import WebSocket from 'ws';
@@ -12,16 +12,32 @@ import path from 'path';
 import os from 'os';
 
 /**
- * 读取 Gateway Token
+ * 读取 Gateway Token（带容错）
  */
 function loadGatewayToken() {
   const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json');
 
   try {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    return config.gateway?.auth?.token || '';
+    if (!fs.existsSync(configPath)) {
+      logger.warn(`Gateway 配置文件不存在: ${configPath}`);
+      return '';
+    }
+    fs.accessSync(configPath, fs.constants.R_OK);
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw);
+    const token = config.gateway?.auth?.token || '';
+    if (!token) {
+      logger.warn('Gateway 配置中未找到 token');
+    }
+    return token;
   } catch (error) {
-    logger.warn('无法读取 Gateway Token', error.message);
+    if (error.code === 'EACCES') {
+      logger.error(`Gateway 配置文件权限不足: ${configPath}`);
+    } else if (error instanceof SyntaxError) {
+      logger.error(`Gateway 配置文件 JSON 格式错误: ${configPath}`);
+    } else {
+      logger.warn(`无法读取 Gateway Token: ${error.message}`);
+    }
     return '';
   }
 }
@@ -35,7 +51,6 @@ class GatewayConnection {
     this.channelName = config.channelName || 'wechat';
     this.version = config.version || '1.0.0';
 
-    // 读取 Gateway Token
     this.gatewayToken = loadGatewayToken();
 
     this.ws = null;
@@ -57,10 +72,12 @@ class GatewayConnection {
   }
 
   /**
-   * 连接到 Gateway
+   * 连接到 Gateway（带超时）
    */
   async connect() {
     return new Promise((resolve, reject) => {
+      const connectTimeout = 15000;
+
       try {
         logger.info(`连接到 OpenClaw Gateway: ${this.url}`);
 
@@ -68,67 +85,71 @@ class GatewayConnection {
           handshakeTimeout: 10000,
         });
 
+        const timer = setTimeout(() => {
+          if (!this.connected) {
+            logger.error(`连接 Gateway 超时 (${connectTimeout}ms)`);
+            try { this.ws.close(); } catch {}
+            reject(new Error('连接 Gateway 超时'));
+          }
+        }, connectTimeout);
+
         this.ws.on('open', () => {
           logger.success('已连接到 OpenClaw Gateway');
           this.connected = true;
           this.reconnectAttempts = 0;
-
-          // 发送连接帧
+          clearTimeout(timer);
           this.sendConnect();
           resolve();
         });
 
         this.ws.on('message', (data) => {
           try {
-            const message = JSON.parse(data.toString());
+            const raw = data.toString();
+            if (!raw || raw.trim() === '') {
+              logger.debug('收到空 Gateway 消息，忽略');
+              return;
+            }
+            const message = JSON.parse(raw);
             this.handleMessage(message);
           } catch (error) {
-            logger.error('解析 Gateway 消息失败', error.message);
+            logger.error(`解析 Gateway 消息失败: ${error.message} raw=${String(data).substring(0, 100)}`);
           }
         });
 
         this.ws.on('close', (code, reason) => {
-          logger.warn(`Gateway 连接关闭: ${code} - ${reason || '无原因'}`);
+          logger.warn(`Gateway 连接关闭: code=${code} reason=${reason || '无'}`);
           this.connected = false;
           this.authenticated = false;
+          clearTimeout(timer);
 
           if (this.onDisconnected) {
             this.onDisconnected(code, reason);
           }
 
-          // 自动重连
           if (this.shouldReconnect) {
             this.scheduleReconnect();
           }
         });
 
         this.ws.on('error', (error) => {
-          logger.error('Gateway 连接错误', error.message);
-
+          logger.error(`Gateway 连接错误: ${error.message}`);
+          clearTimeout(timer);
           if (this.onError) {
             this.onError(error);
           }
         });
-
-        // 超时处理
-        setTimeout(() => {
-          if (!this.connected) {
-            reject(new Error('连接 Gateway 超时'));
-          }
-        }, 10000);
       } catch (error) {
+        logger.error(`创建 Gateway WebSocket 失败: ${error.message}`);
         reject(error);
       }
     });
   }
 
   /**
-   * 发送连接帧
-   */
-  /**
    * 处理 connect.challenge 事件
    */
   handleChallenge(nonce) {
+    logger.info('处理 Gateway 认证挑战...');
     const connectMsg = {
       type: 'req',
       id: 'connect',
@@ -155,104 +176,100 @@ class GatewayConnection {
 
   sendConnect() {
     // connect.challenge 会在 handleMessage 中处理
-    // 这里不需要主动发送
   }
 
   /**
-   * 处理收到的消息
+   * 处理收到的消息（带容错）
    */
   handleMessage(message) {
-    logger.info('收到 Gateway 消息 type=' + message.type + ' event=' + (message.event || 'N/A') + ' id=' + (message.id || 'N/A'));
-
-    // 处理 connect.challenge 事件
-    if (message.type === 'event' && message.event === 'connect.challenge') {
-      logger.info('收到 Gateway 挑战，发送认证...');
-      this.handleChallenge(message.payload.nonce);
-      return;
-    }
-
-    // 处理 agent 事件流
-    if (message.type === 'event' && message.event === 'agent') {
-      const runId = message.payload?.runId;
-      // 用 runId 精确匹配 pending 请求
-      const pending = runId ? this.pendingRequests.get(runId) : null;
-      if (pending && pending.eventHandler) {
-        pending.eventHandler(message);
-      } else if (this.onMessage) {
-        this.onMessage(message.payload);
+    try {
+      if (!message || typeof message !== 'object') {
+        logger.warn('收到无效的 Gateway 消息格式');
+        return;
       }
-      return;
-    }
 
-    // 响应消息
-    if (message.type === 'res') {
-      // 处理 connect 响应
-      if (message.id === 'connect') {
-        if (message.ok) {
-          this.authenticated = true;
-          logger.success('Gateway 认证成功');
-          if (this.onConnected) {
-            this.onConnected();
-          }
-        } else {
-          logger.error('Gateway 认证失败', message.error);
+      logger.debug(`Gateway 消息 type=${message.type} event=${message.event || 'N/A'} id=${message.id || 'N/A'}`);
+
+      // 处理 connect.challenge 事件
+      if (message.type === 'event' && message.event === 'connect.challenge') {
+        logger.info('收到 Gateway 挑战，发送认证...');
+        this.handleChallenge(message.payload?.nonce);
+        return;
+      }
+
+      // 处理 agent 事件流
+      if (message.type === 'event' && message.event === 'agent') {
+        const runId = message.payload?.runId;
+        const pending = runId ? this.pendingRequests.get(runId) : null;
+        if (pending?.eventHandler) {
+          pending.eventHandler(message);
+        } else if (this.onMessage) {
+          this.onMessage(message.payload);
         }
         return;
       }
 
-      // 处理其他待处理请求
-      const pending = this.pendingRequests.get(message.id);
-      if (pending) {
-        // 对于 agent 请求，"accepted" 状态不要删除 pending，等待后续流式响应
-        if (message.id?.startsWith('agent-') && message.payload?.status === 'accepted') {
-          logger.info('Agent 请求已接受，等待流式响应...');
+      // 响应消息
+      if (message.type === 'res') {
+        if (message.id === 'connect') {
+          if (message.ok) {
+            this.authenticated = true;
+            logger.success('Gateway 认证成功');
+            if (this.onConnected) this.onConnected();
+          } else {
+            logger.error('Gateway 认证失败', typeof message.error === 'object' ? JSON.stringify(message.error) : message.error);
+          }
           return;
         }
 
-        this.pendingRequests.delete(message.id);
+        const pending = this.pendingRequests.get(message.id);
+        if (pending) {
+          if (message.id?.startsWith('agent-') && message.payload?.status === 'accepted') {
+            logger.info('Agent 请求已接受，等待流式响应...');
+            return;
+          }
 
-        if (message.ok) {
-          pending.resolve(message.payload || {});
-        } else {
-          const errorMsg = typeof message.error === 'object'
-            ? JSON.stringify(message.error)
-            : (message.error || '请求失败');
-          pending.reject(new Error(errorMsg));
-        }
-      }
-      return;
-    }
+          this.pendingRequests.delete(message.id);
 
-    // 事件消息
-    if (message.type === 'event') {
-      if (message.event === 'connected') {
-        this.authenticated = true;
-        logger.success('Gateway 认证成功');
-        if (this.onConnected) {
-          this.onConnected();
+          if (message.ok) {
+            pending.resolve(message.payload || {});
+          } else {
+            const errorMsg = typeof message.error === 'object'
+              ? JSON.stringify(message.error)
+              : (message.error || '请求失败');
+            pending.reject(new Error(errorMsg));
+          }
         }
-      } else if (message.event === 'message') {
-        if (this.onMessage) {
-          this.onMessage(message.payload);
-        }
+        return;
       }
-      return;
-    }
 
-    // 请求消息 (Gateway 主动发起)
-    if (message.type === 'req') {
-      if (this.onMessage) {
-        this.onMessage(message);
+      // 事件消息
+      if (message.type === 'event') {
+        if (message.event === 'connected') {
+          this.authenticated = true;
+          logger.success('Gateway 认证成功 (connected event)');
+          if (this.onConnected) this.onConnected();
+        } else if (message.event === 'message') {
+          if (this.onMessage) this.onMessage(message.payload);
+        }
+        return;
       }
+
+      // 请求消息 (Gateway 主动发起)
+      if (message.type === 'req') {
+        if (this.onMessage) this.onMessage(message);
+      }
+    } catch (error) {
+      logger.error(`处理 Gateway 消息异常: ${error.message}`, error.stack);
     }
   }
 
   /**
-   * 发送消息到 Gateway
+   * 发送消息到 Gateway（带状态检查）
    */
   send(data) {
     if (!this.connected || !this.ws) {
-      logger.warn('Gateway 未连接，无法发送消息');
+      logger.warn(`Gateway 未连接，无法发送消息 method=${data?.method || 'unknown'}`);
       return null;
     }
 
@@ -261,35 +278,35 @@ class GatewayConnection {
       this.ws.send(message);
       return data.id;
     } catch (error) {
-      logger.error('发送消息到 Gateway 失败', error.message);
+      logger.error(`发送消息到 Gateway 失败: ${error.message}`);
       return null;
     }
   }
 
   /**
-   * 发送请求（等待响应）
-   */
-  /**
-   * 调用 AI Agent (处理流式响应)
+   * 调用 AI Agent (处理流式响应，带超时)
    */
   async callAgent(params) {
     if (!this.connected) {
       throw new Error('Gateway 未连接');
     }
+    if (!this.authenticated) {
+      throw new Error('Gateway 未认证');
+    }
 
     const id = 'agent-' + uuidv4();
     let buffer = '';
 
-    logger.info(`调用 Agent: ${params.agentId} message="${params.message.substring(0, 30)}..."`);
+    const msgPreview = (params.message || '').substring(0, 30);
+    logger.info(`调用 Agent: agentId=${params.agentId} session=${params.sessionKey} message="${msgPreview}..."`);
 
     return new Promise((resolve, reject) => {
-      // 设置超时 (2分钟)
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
+        logger.error(`Agent 响应超时 id=${id} agentId=${params.agentId}`);
         reject(new Error('Agent 响应超时'));
       }, 120000);
 
-      // 注册待处理请求
       this.pendingRequests.set(id, {
         id,
         resolve: (data) => {
@@ -300,43 +317,42 @@ class GatewayConnection {
           clearTimeout(timeout);
           reject(error);
         },
-        // 用于流式响应
         eventHandler: (msg) => {
-          logger.debug('Agent 事件', msg);
+          try {
+            if (msg.type === 'event' && msg.event === 'agent') {
+              const p = msg.payload;
+              if (!p) return;
 
-          if (msg.type === 'event' && msg.event === 'agent') {
-            const p = msg.payload;
-            if (!p) return;
+              if (p.stream === 'assistant') {
+                const d = p.data || {};
+                if (typeof d.text === 'string') {
+                  buffer = d.text;
+                } else if (typeof d.delta === 'string') {
+                  buffer += d.delta;
+                }
+              }
 
-            // 流式文本
-            if (p.stream === 'assistant') {
-              const d = p.data || {};
-              if (typeof d.text === 'string') {
-                buffer = d.text;
-                logger.debug(`Agent 文本: ${buffer.substring(0, 30)}...`);
-              } else if (typeof d.delta === 'string') {
-                buffer += d.delta;
+              if (p.stream === 'lifecycle') {
+                if (p.data?.phase === 'end') {
+                  logger.info(`Agent 完成 id=${id} responseLen=${buffer.length}`);
+                  clearTimeout(timeout);
+                  this.pendingRequests.delete(id);
+                  resolve({ text: buffer.trim() });
+                } else if (p.data?.phase === 'error') {
+                  const errMsg = p.data?.message || 'Agent 错误';
+                  logger.error(`Agent 返回错误 id=${id}: ${errMsg}`);
+                  clearTimeout(timeout);
+                  this.pendingRequests.delete(id);
+                  reject(new Error(errMsg));
+                }
               }
             }
-
-            // 生命周期事件
-            if (p.stream === 'lifecycle') {
-              if (p.data?.phase === 'end') {
-                logger.info(`Agent 完成: ${buffer.substring(0, 30)}...`);
-                clearTimeout(timeout);
-                this.pendingRequests.delete(id);
-                resolve({ text: buffer.trim() });
-              } else if (p.data?.phase === 'error') {
-                clearTimeout(timeout);
-                this.pendingRequests.delete(id);
-                reject(new Error(p.data?.message || 'Agent 错误'));
-              }
-            }
+          } catch (error) {
+            logger.error(`处理 Agent 事件异常 id=${id}: ${error.message}`);
           }
         },
       });
 
-      // 发送请求
       this.send({
         type: 'req',
         id,
@@ -350,7 +366,7 @@ class GatewayConnection {
   }
 
   /**
-   * 普通请求 (非流式)
+   * 普通请求 (非流式，带超时)
    */
   async request(method, params = {}) {
     if (!this.connected) {
@@ -360,13 +376,12 @@ class GatewayConnection {
     const id = uuidv4();
 
     return new Promise((resolve, reject) => {
-      // 设置超时
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(id);
-        reject(new Error('请求超时'));
+        logger.error(`Gateway 请求超时 method=${method} id=${id}`);
+        reject(new Error(`请求超时: ${method}`));
       }, 30000);
 
-      // 注册待处理请求
       this.pendingRequests.set(id, {
         resolve: (data) => {
           clearTimeout(timeout);
@@ -378,7 +393,6 @@ class GatewayConnection {
         },
       });
 
-      // 发送请求
       this.send({
         type: 'req',
         id,
@@ -392,47 +406,60 @@ class GatewayConnection {
    * 发送用户消息到 Gateway
    */
   async sendMessage(fromUser, content, messageType = 'text') {
-    return this.request('send', {
-      channel: this.channelName,
-      message: {
-        from: fromUser,
-        content,
-        type: messageType,
-      },
-    });
+    try {
+      return await this.request('send', {
+        channel: this.channelName,
+        message: { from: fromUser, content, type: messageType },
+      });
+    } catch (error) {
+      logger.error(`发送消息到 Gateway 失败 from=${fromUser}: ${error.message}`);
+      throw error;
+    }
   }
 
   /**
-   * 安排重连
+   * 安排重连（带上限和日志）
    */
   async scheduleReconnect() {
     if (!this.shouldReconnect) return;
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      logger.error(`重连失败次数过多 (${this.reconnectAttempts})，停止重连`);
+      logger.error(`Gateway 重连失败次数过多 (${this.reconnectAttempts}/${this.maxReconnectAttempts})，停止重连`);
       return;
     }
 
     this.reconnectAttempts++;
-    const delay = await backoffDelay(this.reconnectAttempts, 2000, 30000);
+    const waitTime = await backoffDelay(this.reconnectAttempts, 2000, 30000);
 
-    logger.info(`准备重连 Gateway... (尝试 ${this.reconnectAttempts}/${this.maxReconnectAttempts})，等待 ${Math.round(delay / 1000)} 秒`);
+    logger.info(`准备重连 Gateway (尝试 ${this.reconnectAttempts}/${this.maxReconnectAttempts})，等待 ${Math.round(waitTime / 1000)} 秒`);
 
     setTimeout(() => {
-      this.connect().catch((error) => {
-        logger.error('重连 Gateway 失败', error.message);
-      });
-    }, delay);
+      if (this.shouldReconnect) {
+        this.connect().catch((error) => {
+          logger.error(`重连 Gateway 失败: ${error.message}`);
+        });
+      }
+    }, waitTime);
   }
 
   /**
-   * 断开连接
+   * 断开连接（清理 pending requests）
    */
   disconnect() {
     this.shouldReconnect = false;
 
+    // 清理所有 pending requests
+    for (const [id, pending] of this.pendingRequests) {
+      pending.reject(new Error('Gateway 连接已主动关闭'));
+    }
+    this.pendingRequests.clear();
+
     if (this.ws) {
-      this.ws.close();
+      try {
+        this.ws.close();
+      } catch (e) {
+        logger.debug(`关闭 Gateway WebSocket 异常（可忽略）: ${e.message}`);
+      }
       this.ws = null;
     }
 
@@ -441,21 +468,16 @@ class GatewayConnection {
     logger.info('已断开 Gateway 连接');
   }
 
-  /**
-   * 获取状态
-   */
   getStatus() {
     return {
       connected: this.connected,
       authenticated: this.authenticated,
       reconnectAttempts: this.reconnectAttempts,
+      pendingRequests: this.pendingRequests.size,
     };
   }
 }
 
-/**
- * 创建 Gateway 连接
- */
 function createGateway(config) {
   return new GatewayConnection(config);
 }

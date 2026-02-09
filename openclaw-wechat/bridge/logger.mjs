@@ -1,11 +1,18 @@
 /**
- * 日志模块
+ * @module logger
+ * @description 日志模块，支持分级输出到控制台和文件
  */
 
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 import { getLogPaths, ensureDirs } from './config.mjs';
 
+// ── 常量定义 ─────────────────────────────────────────────
+
+/**
+ * 日志级别映射
+ * @enum {number}
+ */
 const LOG_LEVELS = {
   debug: 0,
   info: 1,
@@ -13,10 +20,16 @@ const LOG_LEVELS = {
   error: 3,
 };
 
-let currentLevel = 1; // info
-let logFile = null;
-let consoleEnabled = true;
+/** 默认分隔线字符 */
+const DEFAULT_SEPARATOR_CHAR = '─';
 
+/** 默认分隔线长度 */
+const DEFAULT_SEPARATOR_LENGTH = 50;
+
+/** 级别字符串对齐宽度 */
+const LEVEL_PAD_WIDTH = 5;
+
+/** ANSI 颜色代码 */
 const COLORS = {
   reset: '\x1b[0m',
   dim: '\x1b[2m',
@@ -27,8 +40,22 @@ const COLORS = {
   cyan: '\x1b[36m',
 };
 
+// ── 模块状态 ─────────────────────────────────────────────
+
+/** @type {number} 当前日志级别 */
+let currentLevel = LOG_LEVELS.info;
+
+/** @type {string|null} 日志文件路径 */
+let logFile = null;
+
+/** @type {boolean} 是否启用控制台输出 */
+let consoleEnabled = true;
+
+// ── 内部函数 ─────────────────────────────────────────────
+
 /**
- * 格式化时间戳
+ * 获取当前时间的 ISO 格式字符串（精确到秒）
+ * @returns {string} 格式如 "2024-01-01 12:00:00"
  */
 function timestamp() {
   const now = new Date();
@@ -37,9 +64,13 @@ function timestamp() {
 
 /**
  * 格式化日志消息
+ * @param {string} level - 日志级别
+ * @param {string} message - 日志消息
+ * @param {*} [data=null] - 附加数据
+ * @returns {string} 格式化后的消息
  */
 function formatMessage(level, message, data = null) {
-  const levelStr = level.toUpperCase().padEnd(5);
+  const levelStr = level.toUpperCase().padEnd(LEVEL_PAD_WIDTH);
   const msg = `${timestamp()} [${levelStr}] ${message}`;
   if (data) {
     return msg + ' ' + (typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
@@ -48,7 +79,8 @@ function formatMessage(level, message, data = null) {
 }
 
 /**
- * 写入日志文件
+ * 写入日志文件（自动初始化文件路径）
+ * @param {string} message - 格式化后的日志消息
  */
 function writeToFile(message) {
   if (!logFile) {
@@ -59,13 +91,17 @@ function writeToFile(message) {
 
   try {
     fs.appendFileSync(logFile, message + '\n', 'utf-8');
-  } catch (error) {
+  } catch {
     // 忽略写入错误
   }
 }
 
 /**
- * 输出到控制台
+ * 输出到控制台（带颜色）
+ * @param {string} level - 日志级别
+ * @param {string} color - ANSI 颜色代码
+ * @param {string} message - 日志消息
+ * @param {*} [data] - 附加数据
  */
 function writeToConsole(level, color, message, data) {
   if (!consoleEnabled) return;
@@ -85,8 +121,11 @@ function writeToConsole(level, color, message, data) {
   }
 }
 
+// ── 公共 API ─────────────────────────────────────────────
+
 /**
  * 设置日志级别
+ * @param {string} level - 级别名称：'debug' | 'info' | 'warn' | 'error'
  */
 function setLevel(level) {
   if (typeof level === 'string' && level in LOG_LEVELS) {
@@ -95,14 +134,17 @@ function setLevel(level) {
 }
 
 /**
- * 启用/禁用控制台输出
+ * 启用或禁用控制台输出
+ * @param {boolean} enabled - 是否启用
  */
 function setConsoleEnabled(enabled) {
   consoleEnabled = enabled;
 }
 
 /**
- * Debug 日志
+ * 输出 Debug 级别日志
+ * @param {string} message - 日志消息
+ * @param {*} [data] - 附加数据
  */
 function debug(message, data) {
   if (currentLevel <= LOG_LEVELS.debug) {
@@ -113,7 +155,9 @@ function debug(message, data) {
 }
 
 /**
- * Info 日志
+ * 输出 Info 级别日志
+ * @param {string} message - 日志消息
+ * @param {*} [data] - 附加数据
  */
 function info(message, data) {
   if (currentLevel <= LOG_LEVELS.info) {
@@ -124,7 +168,9 @@ function info(message, data) {
 }
 
 /**
- * Warn 日志
+ * 输出 Warn 级别日志
+ * @param {string} message - 日志消息
+ * @param {*} [data] - 附加数据
  */
 function warn(message, data) {
   if (currentLevel <= LOG_LEVELS.warn) {
@@ -135,7 +181,9 @@ function warn(message, data) {
 }
 
 /**
- * Error 日志
+ * 输出 Error 级别日志
+ * @param {string} message - 日志消息
+ * @param {*} [data] - 附加数据
  */
 function error(message, data) {
   if (currentLevel <= LOG_LEVELS.error) {
@@ -146,7 +194,9 @@ function error(message, data) {
 }
 
 /**
- * 成功日志
+ * 输出成功日志（Info 级别，青色高亮）
+ * @param {string} message - 日志消息
+ * @param {*} [data] - 附加数据
  */
 function success(message, data) {
   if (currentLevel <= LOG_LEVELS.info) {
@@ -157,9 +207,11 @@ function success(message, data) {
 }
 
 /**
- * 分隔线
+ * 输出分隔线
+ * @param {string} [char='─'] - 分隔字符
+ * @param {number} [length=50] - 分隔线长度
  */
-function separator(char = '─', length = 50) {
+function separator(char = DEFAULT_SEPARATOR_CHAR, length = DEFAULT_SEPARATOR_LENGTH) {
   const line = char.repeat(length);
   writeToFile(line);
   if (consoleEnabled) {
@@ -168,10 +220,11 @@ function separator(char = '─', length = 50) {
 }
 
 /**
- * 标题
+ * 输出居中标题
+ * @param {string} text - 标题文本
  */
 function title(text) {
-  const padding = Math.max(0, 50 - text.length - 2);
+  const padding = Math.max(0, DEFAULT_SEPARATOR_LENGTH - text.length - 2);
   const leftPad = Math.floor(padding / 2);
   const rightPad = padding - leftPad;
   const line = `█${' '.repeat(leftPad)}${text}${' '.repeat(rightPad)}█`;
