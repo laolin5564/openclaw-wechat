@@ -45,7 +45,7 @@ async function quickInit() {
   logger.info('检查微信服务 (127.0.0.1:8099)...');
   const wechat = createWechatService({
     ...config.wechatService,
-    adminKey: 'daidai',
+    adminKey: process.env.WECHAT_ADMIN_KEY || 'daidai',
   });
 
   let authKey;
@@ -53,14 +53,15 @@ async function quickInit() {
     logger.info('正在生成授权码...');
     authKey = await wechat.genAuthKey(1, 365);
     saveAuthKey(authKey);
-    logger.success(`授权码已生成: ${authKey}`);
+    logger.success('授权码已生成并保存');
   } catch (error) {
     logger.error('生成授权码失败', error.message);
 
-    // 使用默认授权码
-    authKey = 'HBe6xqD0LJIf';
+    // 生成随机授权码作为后备
+    const { randomBytes } = await import('node:crypto');
+    authKey = randomBytes(12).toString('base64url');
     saveAuthKey(authKey);
-    logger.info(`使用默认授权码: ${authKey}`);
+    logger.info('已生成随机后备授权码');
   }
 
   config.wechatService.authKey = authKey;
